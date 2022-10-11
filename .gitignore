@@ -1,5 +1,8 @@
 results/**
+**/results
+**/logs
 resources/**
 logs/**
+
 .snakemake
 .snakemake/**

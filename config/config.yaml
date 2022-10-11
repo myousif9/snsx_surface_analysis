@@ -1,0 +1,23 @@
+controls: 'none'
+patients: 'none'
+controls_file: 'none'
+patients: 'none'
+
+
+
+dwi: '/scratch/myousif9/snsx_inprogress/sourcedata/SNSX_7T/tar2bids_v0.0.5e/deriv/prepdwi_v0.0.12b/'
+hippunfold: '/scratch/myousif9/snsx_inprogress/output/snsx_hippunfold/'
+anat_preproc: '/scratch/myousif9/snsx_inprogress/output/snsx_preprocess_ciftify/derivatives/'
+
+output_dir: '/scratch/myousif9/snsx_inprogress/outputs/snsx_surf_analysis_prep'
+
+resources:
+  cores: 16
+  mem_mb: 32000
+  time: 180
+
+singularity:
+  autotop: '/scratch/myousif9/containers/autotop_deps_v0.4.1.sif'
+
+
+

@@ -1,4 +1,236 @@
-# Main entrypoint of the workflow. 
-# Please follow the best practices: 
-# https://snakemake.readthedocs.io/en/stable/snakefiles/best_practices.html,
-# in particular regarding the standardized folder structure mentioned there. 
+import snakebids
+from snakebids import bids
+import os
+from os.path import join
+import numpy as np
+
+configfile: workflow.source_path('../config/config.yaml')
+
+get_sub_set = lambda dir_path: set([sub.strip().replace('sub-','') for sub in os.listdir(dir_path) if 'sub' in sub])
+
+
+prepdwi_subs = get_sub_set(join(config['dwi'],'prepdwi'))
+hippunfold_subs =  get_sub_set(join(config['hippunfold'],'hippunfold'))
+ciftify_subs = get_sub_set(join(config['anat_preproc'],'ciftify'))
+
+subject_list = sorted(list(prepdwi_subs & hippunfold_subs & ciftify_subs))
+
+subjects_array = np.array(subject_list)
+
+
+rule dwivol2hippo:
+    input: 
+        surf = join(
+            config['hippunfold'],
+            bids(
+                root ='hippunfold',
+                subject = '{subject}',
+                datatype = 'surf',
+                hemi = '{hemi}',
+                space = 'T1w',
+                den = '{hipp_density}',
+                label = 'hipp',
+                suffix = 'midthickness.surf.gii'
+            )),
+        unfolded_surf = join(
+            config['hippunfold'],
+            bids(
+                root ='hippunfold',
+                subject = '{subject}',
+                datatype = 'surf',
+                hemi = '{hemi}',
+                space = 'unfolded',
+                den = '{hipp_density}',
+                label = 'hipp',
+                suffix = 'midthickness.surf.gii'
+            )),
+        vol = join(
+            config['dwi'],
+            'prepdwi/sub-{subject}/dwi/sub-{subject}_dwi_space-T1wGC_proc-FSL_{dwi_metric}.nii.gz'
+        )
+    params:
+        sub_dir = 'results/sub-{subject}/surf/'
+    output: 
+        surf_metric = bids(
+            root = 'results',
+            subject = '{subject}',
+            datatype = 'dwi',
+            hemi = '{hemi}',
+            space = 'T1w',
+            den = '{hipp_density}',
+            label = 'hipp',
+            suffix = '{dwi_metric}.shape.gii'
+        ),
+    group: 'subj'
+    container: config['singularity']['autotop']
+    threads: config['resources']['cores']
+    resources:
+        mem_mb = config['resources']['mem_mb'],
+        time = config['resources']['time']
+    shell:
+        """
+        wb_command -volume-to-surface-mapping {input.vol} {input.surf} {output.surf_metric} -trilinear
+        mkdir -p {params.sub_dir}
+        cp -n {input.surf} {params.sub_dir}
+        cp -n {input.unfolded_surf} {params.sub_dir}
+        """
+
+rule dwi_metric:
+    input: 
+        dwi_metricL = expand(
+            rules.dwivol2hippo.output.surf_metric,
+            hemi = 'L',
+            allow_missing=True
+        ),
+        dwi_metricR = expand(
+            rules.dwivol2hippo.output.surf_metric,
+            hemi = 'R',
+            allow_missing=True
+        ),
+    output:
+        surf = bids(
+            root = 'results',
+            subject = '{subject}',
+            datatype = 'dwi',
+            space = 'T1w',
+            den = '{hipp_density}',
+            label = 'hipp',
+            suffix = '{dwi_metric}.dscalar.nii'
+        ),
+    group: 'subj'
+    container: config['singularity']['autotop']
+    threads: config['resources']['cores']
+    resources:
+        mem_mb = config['resources']['mem_mb'],
+        time = config['resources']['time']
+    shell: "wb_command -cifti-create-dense-scalar {output.surf} -left-metric {input.dwi_metricL} -right-metric {input.dwi_metricR}"
+
+rule aggregate_hippo_dwi:
+    input:
+        metric = expand(
+            rules.dwi_metric.output.surf,
+            subject = subject_list,
+            allow_missing=True
+        ),
+    params:
+        merge_opt = lambda wildcards, input: " ".join(
+            [f"-cifti {cifti}" for cifti in input.metric]
+        ),
+    output:
+        group = bids(
+            root = 'results',
+            subject = 'group',
+            datatype = 'dwi',
+            space = 'T1w',
+            den = '{hipp_density}',
+            label = 'hipp',
+            suffix = '{dwi_metric}.dscalar.nii'
+        ),
+    group: 'agg_hipp'
+    container: config['singularity']['autotop']
+    threads: config['resources']['cores']
+    resources:
+        mem_mb = config['resources']['mem_mb'],
+        time = config['resources']['time']
+    shell: "wb_command -cifti-merge {output.group} {params.merge_opt}"
+
+rule aggregate_hipp_morph:
+    input:
+        metric = expand(
+            join(
+                config['hippunfold'],
+                bids(
+                    root = 'hippunfold',
+                    subject = '{subject}',
+                    datatype = 'surf',
+                    space = 'T1w',
+                    den = '{hipp_density}',
+                    label = 'hipp',
+                    suffix = '{hipp_metric}.dscalar.nii'
+                )
+            ),
+            subject = subject_list,
+            allow_missing=True
+            ),
+    params:
+        merge_opt = lambda wildcards, input: " ".join(
+            [f"-cifti {cifti}" for cifti in input.metric]
+        ),
+    output:
+        metric_group = bids(
+            root = 'results',
+            subject = 'group',
+            datatype = 'surf',
+            space = 'T1w',
+            den = '{hipp_density}',
+            label = 'hipp',
+            suffix = '{hipp_metric}.dscalar.nii'
+        ),
+    group: 'agg_hipp'
+    container: config['singularity']['autotop']
+    threads: config['resources']['cores']
+    resources:
+        mem_mb = config['resources']['mem_mb'],
+        time = config['resources']['time']
+    shell: "wb_command -cifti-merge {output.metric_group} {params.merge_opt}"
+
+
+rule aggregate_ctx_features:
+    input: 
+        metric = expand(join(
+            config['anat_preproc'],
+            'ciftify/sub-{subject}/MNINonLinear/sub-{subject}.{metric}.164k_fs_LR.dscalar.nii'
+        ),
+        subject = subject_list,
+        allow_missing=True)
+    params:
+        merge_opt = lambda wildcards, input: " ".join(
+            [f"-cifti {cifti}" for cifti in input.metric]
+        ),
+    output:
+        metric_group = bids(
+            root = 'results',
+            subject = 'group',
+            datatype = 'surf',
+            space = 'fsLR',
+            den='164k',
+            suffix ='{metric}.dscalar.nii'
+        ) 
+    group: 'agg_ctx'
+    container: config['singularity']['autotop']
+    threads: config['resources']['cores']
+    resources:
+        mem_mb = config['resources']['mem_mb'],
+        time = config['resources']['time']
+    shell: "wb_command -cifti-merge {output.metric_group} {params.merge_opt}"
+
+rule all:
+    input:
+        expand(
+            rules.dwivol2hippo.output.surf_metric,
+            subject = subject_list,
+            hemi = ['L','R'],
+            hipp_density = '0p5mm',
+            dwi_metric = ['FA','MD'],
+        ),
+        expand(
+            rules.dwi_metric.output.surf,
+            subject = subject_list,
+            hipp_density = '0p5mm',
+            dwi_metric = ['FA','MD'],
+        ),
+        expand(
+            rules.aggregate_hippo_dwi.output.group,
+            hipp_density = '0p5mm',
+            dwi_metric = ['FA','MD'],
+        ),
+        expand(
+            rules.aggregate_hipp_morph.output.metric_group,
+            hipp_density = '0p5mm',
+            hipp_metric = ['thickness','curvature','gyrification','myelin'],
+        ),
+        expand(
+            rules.aggregate_ctx_features.output.metric_group,
+            metric = ['thickness','curvature'],
+        ),
+    default_target: True
